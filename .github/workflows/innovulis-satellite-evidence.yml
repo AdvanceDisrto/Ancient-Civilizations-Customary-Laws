@@ -1,0 +1,73 @@
+name: iNNOVULIS satellite evidence smoke
+on:
+  pull_request:
+  push:
+    branches:
+      - 'ci/ecosystem-evidence-*'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  evidence-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Create evidence directory
+        run: mkdir -p test-artifacts
+      - name: Install test requirements
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pip --version 2>&1 | tee test-artifacts/install.log
+      - name: Compile sources
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m compileall -q ledger.py tests 2>&1 | tee test-artifacts/compile.log
+      - name: Execute tests
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m unittest discover -s tests -v 2>&1 | tee test-artifacts/tests.log
+      - name: Write provenance and file checksums
+        if: always()
+        shell: bash
+        env:
+          REPO: ${{ github.repository }}
+          COMMIT: ${{ github.sha }}
+          WORKFLOW_RUN: ${{ github.run_id }}
+          WORKFLOW_ATTEMPT: ${{ github.run_attempt }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          python - <<'PY'
+          import json, os, pathlib, hashlib, datetime
+          root=pathlib.Path("test-artifacts"); root.mkdir(exist_ok=True)
+          data={"schema":"innovulis/satellite-ci-observation/v1",
+                "repository":os.environ["REPO"],"commit":os.environ["COMMIT"],
+                "run_id":os.environ["WORKFLOW_RUN"],"attempt":os.environ["WORKFLOW_ATTEMPT"],
+                "job_status_at_manifest_step":os.environ["JOB_STATUS"],
+                "runner":"github-actions/ubuntu-latest/python3.12",
+                "timestamp_utc":datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "scope":"repository-local compile and tests only",
+                "cross_repo_schema_interoperability":"NOT_TESTED",
+                "hardware_execution":"NOT_TESTED",
+                "attestation":"UNSIGNED_CI_OBSERVATION"}
+          (root/"ci-observation.json").write_text(json.dumps(data,indent=2,sort_keys=True)+"\n")
+          entries=[]
+          for p in sorted(root.glob("*")):
+              if p.is_file() and p.name!="SHA256SUMS.txt":
+                  entries.append(f'{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.name}')
+          (root/"SHA256SUMS.txt").write_text("\n".join(entries)+"\n")
+          PY
+      - name: Upload evidence even on failure
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: satellite-ci-evidence
+          path: test-artifacts/
+          retention-days: 30
+          if-no-files-found: error
